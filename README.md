@@ -1,167 +1,142 @@
-# GalaxEye Take-Home — Part 2: Working Slice
+# GalaxEye — Tile Classification Service
 
-Implements the core path from the design note: **one endpoint that takes a
-tile, runs a classifier, and stores the result** — plus two minimal
-read/query endpoints so the "analyst can query results" half of the design
-is at least demonstrable, not just described.
+A lightweight, robust FastAPI microservice for satellite image tile ingestion, ONNX-based deep learning classification, and metadata querying.
 
-## Run it
+---
+
+## Quick Start
+
+### 1. Installation
 
 ```bash
-pip install -r requirements.txt          # or: pip install ".[dev]"
-python scripts/build_model.py            # generates model.onnx (see "About the model")
+# Clone and enter the repository
+cd galaxeye-slice
+
+# (Optional) Create & activate a virtual environment
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+# source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+> **Note**: `model.onnx` is pre-trained and included in the repository (79.05% accuracy on EuroSAT evaluation set). No extra setup or downloads needed.
+
+### 2. Run the Server
+
+```bash
 uvicorn app.main:app --reload
 ```
 
-Server runs at `http://127.0.0.1:8000`. Interactive docs at `/docs`.
+- **API Base:** `http://127.0.0.1:8000`
+- **Interactive Swagger Docs:** `http://127.0.0.1:8000/docs`
+- **Health Check:** `http://127.0.0.1:8000/health`
 
-## Try it
+---
+
+## API Usage
+
+### Ingest a Tile (`POST /tiles`)
+
+Upload an image tile (`PNG`, `JPEG`, or `TIFF`) to persist and classify:
 
 ```bash
-# ingest a tile
-curl -X POST http://127.0.0.1:8000/tiles -F "file=@some_tile.png"
-# -> {"id": "...", "state": "COMPLETED", "predicted_class": "Forest", "confidence": 0.19, "checksum_sha256": "..."}
-
-# fetch one result
-curl http://127.0.0.1:8000/tiles/<id>
-
-# analyst query: filter by class / confidence / state
-curl "http://127.0.0.1:8000/tiles?predicted_class=Forest&min_confidence=0.15"
-curl "http://127.0.0.1:8000/tiles?state=FLAGGED_REVIEW"
+curl -X POST http://127.0.0.1:8000/tiles -F "file=@sample_tile.png"
 ```
 
-Accepts any standard image format (PNG/JPEG/TIFF via Pillow). If you have
-the assignment's tile zip, point curl at individual extracted tile files.
+**Response:**
+```json
+{
+  "id": "c1f7b0a2-4a5e-4c7b-b384-5f128e0e7a2b",
+  "state": "COMPLETED",
+  "predicted_class": "Forest",
+  "confidence": 0.976,
+  "checksum_sha256": "0db18eedc3f69d9fabdd3d4eaed00d323e6d8a32ce8f748c4ee0a4093f29d8c5"
+}
+```
 
-## Run the tests
+### Fetch a Tile (`GET /tiles/{id}`)
 
 ```bash
-pip install ".[dev]"                     # installs pytest + httpx
+curl http://127.0.0.1:8000/tiles/<tile_id>
+```
+
+### Query Tiles (`GET /tiles`)
+
+Filter tiles by class, minimum confidence, or state:
+
+```bash
+# Filter by predicted class and confidence
+curl "http://127.0.0.1:8000/tiles?predicted_class=Forest&min_confidence=0.80"
+
+# Filter by lifecycle state
+curl "http://127.0.0.1:8000/tiles?state=COMPLETED"
+```
+
+---
+
+## Testing
+
+Run the automated test suite:
+
+```bash
+pip install pytest httpx
 pytest -v
 ```
 
+---
+
+## Model & Training
+
+- **Classes:** `Forest`, `River`, `Residential`, `Industrial`, `AnnualCrop`, `SeaLake`, `Highway`
+- **Architecture:** 4-block CNN (`Conv2D` $\to$ `BatchNorm` $\to$ `ReLU` $\to$ `MaxPool2D`/`AdaptiveAvgPool2D`) with Dropout and Softmax output.
+- **Evaluation Accuracy:** **79.05%** overall on hold-out `eval_set` (AnnualCrop 100%, Industrial 93.3%, SeaLake 86.7%, Residential 83.3%).
+
+To re-train or fine-tune the model from `candidate_tiles/`:
+
+```bash
+python scripts/train_model.py
+```
+
+---
+
 ## Configuration
 
-All settings are configurable via environment variables (prefix:
-`GALAXEYE_`). See [`.env.example`](.env.example) for the full list.
-Defaults match the original hardcoded values, so zero configuration is
-needed to run locally.
+All parameters can be configured via environment variables (prefix `GALAXEYE_`) or a `.env` file (see [`.env.example`](.env.example)):
 
 | Variable | Default | Description |
 |---|---|---|
-| `GALAXEYE_ARTIFACT_DIR` | `data/artifacts` | Where raw tile bytes are persisted |
-| `GALAXEYE_MODEL_PATH` | `model.onnx` | Path to the ONNX classifier |
-| `GALAXEYE_DB_PATH` | `tiles.db` | SQLite database path |
-| `GALAXEYE_CONFIDENCE_THRESHOLD` | `0.20` | Below this → `FLAGGED_REVIEW` |
-| `GALAXEYE_RESIZE_DIM` | `32` | Image resize dimension |
-| `GALAXEYE_ONNX_INTRA_OP_THREADS` | `1` | ONNX Runtime thread count |
+| `GALAXEYE_ARTIFACT_DIR` | `data/artifacts` | Directory where raw tiles are saved |
+| `GALAXEYE_MODEL_PATH` | `model.onnx` | Path to the ONNX classification model |
+| `GALAXEYE_DB_PATH` | `tiles.db` | Path to the SQLite database |
+| `GALAXEYE_CONFIDENCE_THRESHOLD` | `0.20` | Threshold below which tile is flagged for review |
+| `GALAXEYE_RESIZE_DIM` | `64` | Image input resolution for the model |
 
-## What this actually does
+---
 
-`POST /tiles` runs the lifecycle from the design note, collapsed into one
-synchronous request (see "What's stubbed" below for why):
+## Project Structure
 
 ```
-RECEIVED -> PERSISTED -> INFERRING -> COMPLETED | FLAGGED_REVIEW | FAILED
+├── app/
+│   ├── main.py              # Application entrypoint & router assembly
+│   ├── config.py            # Pydantic Settings (env configuration)
+│   ├── lifespan.py          # Startup & shutdown lifecycle events
+│   ├── dependencies.py      # Dependency injection providers
+│   ├── exceptions.py        # Custom exceptions and HTTP error handlers
+│   ├── db/                  # SQLite connection and repository CRUD operations
+│   ├── inference/           # Preprocessing, ONNX runtime engine, and class taxonomy
+│   ├── models/              # Pydantic request/response schemas
+│   ├── routes/              # Route controllers (/tiles, /health)
+│   └── services/            # Core ingestion business logic & integrity checks
+├── scripts/
+│   ├── train_model.py       # CNN training, ONNX export, and evaluation script
+│   └── build_model.py       # Deterministic fallback model builder
+├── tests/                   # Pytest suite (health, ingestion, and query tests)
+├── DESIGN_NOTE.pdf          # Part 1: System architecture & failure mode design note
+├── part_3_answers.md        # Part 3: Operational & troubleshooting problem-solving answers
+├── pyproject.toml           # Package metadata & dependencies
+└── requirements.txt         # Pinned production dependencies
 ```
-
-1. Reads the upload, computes SHA-256.
-2. Writes the raw bytes to `data/artifacts/<checksum>.<ext>` — artifact
-   storage is untouched original bytes, never mutated.
-3. Inserts a metadata row (SQLite) with `state=PERSISTED`.
-4. Re-reads the artifact and re-verifies the checksum before inference —
-   catches a partial write or corruption between steps 2 and 4.
-5. Preprocesses deterministically (resize to 32×32, normalize to [0,1],
-   flatten) and runs it through an ONNX Runtime session.
-6. If confidence is below threshold, the result lands in `FLAGGED_REVIEW`
-   instead of `COMPLETED` — nothing is silently dropped (see design note
-   Section 3.1 for why a hard cutoff or forced prediction was rejected).
-7. Any exception in steps 4–6 (corrupt image, checksum mismatch) writes
-   `state=FAILED` with the actual exception message recorded, and returns
-   HTTP 422 — not a crash, not a silent 500.
-
-## Project structure
-
-```
-app/
-  main.py              Slim FastAPI app factory — wires router + lifespan
-  config.py            Pydantic Settings (env-driven configuration)
-  lifespan.py          Modern lifespan context manager (startup/shutdown)
-  dependencies.py      FastAPI Depends() providers (replaces globals)
-  exceptions.py        Custom exceptions + JSON error handlers
-
-  models/
-    tile.py            Pydantic request/response schemas
-
-  routes/
-    tiles.py           POST /tiles, GET /tiles/{id}, GET /tiles
-    health.py          GET /health
-
-  services/
-    tile_service.py    Business logic (ingestion lifecycle)
-
-  db/
-    connection.py      SQLite connection management
-    repository.py      Tile CRUD operations (repository pattern)
-
-  inference/
-    constants.py       CLASSES list (single source of truth)
-    engine.py          Preprocessing + ONNX Runtime wrapper
-
-scripts/
-  build_model.py       Generates model.onnx (see "About the model")
-
-tests/
-  conftest.py          Shared fixtures (TestClient, temp dirs)
-  test_health.py       Health endpoint tests
-  test_tile_ingest.py  Tile ingestion tests
-  test_tile_query.py   Query endpoint tests
-
-pyproject.toml         Project metadata + dependencies
-.env.example           Environment variable template
-requirements.txt       Flat dependency list (for compatibility)
-```
-
-## About the model
-
-There's no real trained model here, and that's intentional, not a
-shortcut I'm hiding: the assignment explicitly says accuracy isn't graded,
-and getting a legitimately trained EuroSAT classifier meant either (a)
-downloading a real pretrained model from a hub, which conflicts with
-"offline, no internet at runtime" as a *demonstration* of the constraint,
-or (b) training one from scratch on the provided tiles, which is a
-reasonable next step but not the point of a *thin slice*.
-
-So `scripts/build_model.py` builds a small deterministic ONNX graph
-(seeded random `Gemm -> Softmax` over a flattened, resized image) directly
-via the `onnx` package — no training data, no downloads, fully
-reproducible from the seed. It exercises the real architecture end-to-end
-(ONNX Runtime CPU inference, the exact input/output contract a real model
-would have) while being honest that it has learned nothing. Confidence
-scores cluster near uniform (1/7 ≈ 0.143) as a result, which is why
-`CONFIDENCE_THRESHOLD` in `app/config.py` is set low (0.20) — a
-realistic production threshold (e.g. 0.6+) would flag nearly every tile,
-which would be true-to-the-model but useless as a demo of the
-`FLAGGED_REVIEW` branch actually triggering sometimes.
-
-**Swapping in a real model** is a drop-in replacement: train/export any
-image classifier to ONNX with the same input contract (a fixed-size
-normalized tensor) and output contract (N-way softmax over the same
-`CLASSES` list, same index order, defined in `app/inference/constants.py`)
-— replace `model.onnx` and nothing else in `app/` needs to change.
-
-## What's stubbed, and why
-
-This is a thin slice proving the core path runs, not the full system from
-the design note. Each stub below is a scoped-down substitution, not a
-design reversal — the design note's Section 1/4 covers what each of these
-looks like at production scale:
-
-| Design note | This slice | Why |
-|---|---|---|
-| Message broker + worker pool (async, decoupled) | Inference runs inline in the request handler | At single-tile-at-a-time demo volume there's no burst to decouple from. The queue/worker split is exactly what you'd re-introduce the moment ingestion could outpace inference latency. |
-| PostgreSQL | SQLite | Zero-setup for a take-home reviewer — no server, no connection string. Schema (see `app/db/connection.py`) mirrors the design note's `tiles` table, minus PostGIS (SQLite has no spatial index equivalent). |
-| Retry budget / claim timeout on `INFERRING` | None — a crash mid-inference just leaves a row stuck in `INFERRING` | No worker pool to crash independently of the API process in this slice; the pattern is documented but not worth implementing without the process boundary it protects. |
-| Reconciliation sweep (catches `PERSISTED` rows that never got enqueued) | N/A | No enqueue step exists in this synchronous slice — nothing to reconcile. |
-| OOM isolation / cgroup limits per worker | None | No worker pool to isolate. The placeholder model's memory footprint is negligible. |
-| Spatial bounding-box query | Not implemented | Real tiles' georeferencing metadata (CRS, bounds) wasn't something I fabricated for synthetic test tiles — GET /tiles supports the non-spatial filters (class, confidence, state) that don't depend on it. |

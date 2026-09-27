@@ -23,7 +23,7 @@ env/
 
 # Project-specific
 tiles.db
-model.onnx
+*.onnx.data
 data/artifacts/*
 !data/artifacts/.gitkeep
 

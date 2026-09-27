@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # ── Inference tuning ────────────────────────────────────────────
     confidence_threshold: float = 0.20
-    resize_dim: int = 32
+    resize_dim: int = 64
     onnx_intra_op_threads: int = 1
 
     # ── API defaults ────────────────────────────────────────────────

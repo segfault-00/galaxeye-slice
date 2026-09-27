@@ -2,7 +2,7 @@
 Deterministic preprocessing + ONNX Runtime inference.
 
 This module is the one place the input contract (resize dims, normalization,
-class order) is defined.  It must stay in lockstep with ``scripts/build_model.py``
+class order) is defined.  It must stay in lockstep with ``scripts/train_model.py``
 — in a real system this pairing would ship as a single versioned artifact
 (model.onnx + preprocessing config) — see the design note, Section 4.
 """
@@ -31,7 +31,7 @@ class InferenceEngine:
         self,
         model_path: Path,
         *,
-        resize_dim: int = 32,
+        resize_dim: int = 64,
         intra_op_threads: int = 1,
     ) -> None:
         # ``intra_op_num_threads`` pinned deliberately: see design note
@@ -55,16 +55,18 @@ class InferenceEngine:
     # ── Preprocessing ───────────────────────────────────────────────
 
     def preprocess(self, raw_bytes: bytes) -> np.ndarray:
-        """Deterministic: decode → RGB → resize (bilinear) → [0,1] → flatten.
+        """Deterministic: decode → RGB → resize (bilinear) → [0,1] → CHW.
 
+        Input contract: (1, 3, resize_dim, resize_dim) float32 in [0, 1].
         Any change here changes model output for a given input, so this
         function's behavior is what must be version-pinned in production,
         not just the model weights.
         """
         img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
         img = img.resize((self.resize_dim, self.resize_dim), Image.BILINEAR)
-        arr = np.asarray(img, dtype=np.float32) / 255.0
-        return arr.flatten().reshape(1, -1)
+        arr = np.asarray(img, dtype=np.float32) / 255.0  # (H, W, 3)
+        arr = arr.transpose(2, 0, 1)  # → (3, H, W)
+        return arr.reshape(1, 3, self.resize_dim, self.resize_dim)
 
     # ── Prediction ──────────────────────────────────────────────────
 
